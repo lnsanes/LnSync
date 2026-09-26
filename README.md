@@ -290,4 +290,4 @@ LnSync/
 
 ## 许可
 
-MIT
+[Apache License 2.0](LICENSE)（与 [ItemBan](https://github.com/lnsanes/itemban) 相同）

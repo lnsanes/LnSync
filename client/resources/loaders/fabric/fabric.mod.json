@@ -4,7 +4,7 @@
   "version": "0.1.1",
   "name": "LnSync",
   "description": "LnSync early sync mod (Fabric). Pulls files from the update server by hash before the game starts.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "environment": "*",
   "entrypoints": {
     "preLaunch": [
