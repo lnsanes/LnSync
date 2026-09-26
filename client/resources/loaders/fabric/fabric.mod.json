@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "lnsync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "LnSync",
   "description": "LnSync early sync mod (Fabric). Pulls files from the update server by hash before the game starts.",
   "license": "MIT",

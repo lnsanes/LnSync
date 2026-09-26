@@ -145,6 +145,10 @@ public final class LaunchHook {
         String configured = updateServer(instance);
         int port = 8765;
         if (configured != null && !configured.isBlank()) {
+            configured = Net.normalizeHttpBase(configured);
+            if (configured.endsWith("/")) {
+                configured = configured.substring(0, configured.length() - 1);
+            }
             urls.add(configured);
             try {
                 URI uri = URI.create(configured);

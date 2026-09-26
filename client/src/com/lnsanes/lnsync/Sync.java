@@ -78,7 +78,8 @@ final class Sync {
         }
 
         Client(String base, String side, Path instance, String token) {
-            this.base = base.endsWith("/") ? base : base + "/";
+            String normalized = Net.normalizeHttpBase(base == null ? "" : base.trim());
+            this.base = normalized.endsWith("/") ? normalized : normalized + "/";
             this.side = side == null || side.isBlank() ? "client" : side;
             this.token = token == null ? "" : token.trim();
             if ("server".equals(this.side) && instance != null) {
