@@ -1,0 +1,16 @@
+LnSync 客户端模组
+================
+
+不要双击 jar。
+
+推荐（Forge / NeoForge / Fabric / Quilt 通用）：
+  把 lnsync.jar 放入 mods\
+  （与 lnsync-universal.jar 相同）
+
+可选精简专用包：
+  lnsync-forge.jar / lnsync-neoforge.jar / lnsync-fabric.jar / lnsync-quilt.jar
+
+再把 lnsync.toml.example 复制为实例根目录的 lnsync.toml，填 update_server / update_token，
+用启动器正常开游戏；模组会在启动早期从更新服务器按哈希拉文件。
+
+日志：实例 logs\lnsync.log

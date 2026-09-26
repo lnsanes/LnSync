@@ -1,0 +1,20 @@
+# LnSync 更新服务器配置模板
+# 复制为 server/config.toml 后修改。解析按「键 = 值」行匹配。
+
+[server]
+listen = "127.0.0.1"
+port = 8765
+
+[source]
+provider = "github"
+repo = "Owner/PackName"
+api = "https://api.github.com"
+tag = ""
+client_asset = "*Client*.zip"
+server_asset = "*Server*.zip"
+loader = "auto"   # auto|forge|neoforge|fabric|quilt
+
+[auth]
+access_token = ""
+server_access_token = ""
+admin_token = ""

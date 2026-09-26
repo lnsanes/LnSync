@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Main-Class: com.lnsanes.lnsync.Main
+Automatic-Module-Name: com.lnsanes.lnsync
+

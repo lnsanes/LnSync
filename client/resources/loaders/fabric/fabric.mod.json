@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "lnsync",
+  "version": "0.1.0",
+  "name": "LnSync",
+  "description": "LnSync early sync mod (Fabric). Pulls files from the update server by hash before the game starts.",
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "preLaunch": [
+      "com.lnsanes.lnsync.LnSyncFabricPreLaunch"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.14.0",
+    "minecraft": "*"
+  }
+}

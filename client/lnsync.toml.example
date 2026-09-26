@@ -1,0 +1,7 @@
+# 放到 Minecraft 实例根目录（与 mods/ 同级），文件名改为 lnsync.toml
+
+update_server = "http://127.0.0.1:8765"
+update_token = ""
+
+# 可选：同步到别的目录（相对本文件所在实例，或绝对路径）
+# instance_dir = "."

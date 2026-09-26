@@ -1,0 +1,33 @@
+# 构建产物
+server/target/
+client/out/
+client/out-*/
+*.class
+
+# 本地配置与密钥（勿提交）
+server/config.toml
+**/config.toml
+!server/config.example.toml
+!config.example.toml
+!**/lnsync.toml.example
+.env
+.env.*
+*.pem
+*.key
+
+# 运行时数据与私货
+server/data/
+server/private/
+**/private/files/
+_loader_e2e/
+
+# 客户端发行副本可重建；源码与示例保留
+dist/client/*.jar
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
