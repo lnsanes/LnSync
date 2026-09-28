@@ -4,7 +4,7 @@ license="Apache License 2.0"
 
 [[mods]]
 modId="lnsync"
-version="0.1.1"
+version="0.1.2"
 displayName="LnSync"
 displayTest="IGNORE_SERVER_VERSION"
 description="LnSync 前置同步模组（Forge）。客户端启动时从更新服务器按哈希拉取文件。"

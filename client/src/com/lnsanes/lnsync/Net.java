@@ -1,4 +1,4 @@
-﻿package com.lnsanes.lnsync;
+package com.lnsanes.lnsync;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
+import java.net.IDN;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.ProxySelector;
@@ -55,6 +56,72 @@ final class Net {
     private static HttpClient client;
 
     private Net() {}
+
+    static String normalizeHttpBase(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return raw;
+        }
+        String text = raw.trim();
+        if (!text.contains("://")) {
+            text = "http://" + text;
+        }
+        try {
+            URI probe = URI.create(text);
+            String host = probe.getHost();
+            if (host != null && host.equals(IDN.toASCII(host))) {
+                if (probe.getRawPath() == null || probe.getRawPath().isEmpty() || "/".equals(probe.getRawPath())) {
+                    return text.endsWith("/") ? text : text + "/";
+                }
+                return text;
+            }
+        } catch (Exception ignored) {
+            // fall through to manual parse
+        }
+        int schemeEnd = text.indexOf("://");
+        String scheme = text.substring(0, schemeEnd);
+        String rest = text.substring(schemeEnd + 3);
+        int pathAt = indexOfPath(rest);
+        String authority = pathAt < 0 ? rest : rest.substring(0, pathAt);
+        String pathQuery = pathAt < 0 ? "" : rest.substring(pathAt);
+        int at = authority.lastIndexOf('@');
+        String userinfo = at >= 0 ? authority.substring(0, at + 1) : "";
+        String hostPort = at >= 0 ? authority.substring(at + 1) : authority;
+        String host;
+        String port = "";
+        if (hostPort.startsWith("[")) {
+            int close = hostPort.indexOf(']');
+            host = hostPort.substring(0, Math.max(close + 1, 1));
+            if (close >= 0 && close + 1 < hostPort.length() && hostPort.charAt(close + 1) == ':') {
+                port = hostPort.substring(close + 1);
+            }
+        } else {
+            int colon = hostPort.lastIndexOf(':');
+            if (colon >= 0 && hostPort.indexOf(':') == colon) {
+                host = hostPort.substring(0, colon);
+                port = hostPort.substring(colon);
+            } else {
+                host = hostPort;
+            }
+        }
+        String asciiHost = IDN.toASCII(host);
+        String normalized = scheme + "://" + userinfo + asciiHost + port + pathQuery;
+        if (pathQuery.isEmpty() || "/".equals(pathQuery)) {
+            if (!normalized.endsWith("/")) {
+                normalized = normalized + "/";
+            }
+        }
+        return normalized;
+    }
+
+    private static int indexOfPath(String authorityAndPath) {
+        for (int i = 0; i < authorityAndPath.length(); i++) {
+            char ch = authorityAndPath.charAt(i);
+            if (ch == '/' || ch == '?' || ch == '#') {
+                return i;
+            }
+        }
+        return -1;
+    }
 
     static void installJvmDefaults() {
         if (System.getProperty("java.net.useSystemProxies") == null) {

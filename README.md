@@ -2,7 +2,7 @@
 
 面向 Minecraft 整合包的通用文件更新器：服务端按清单托管文件，客户端在游戏启动早期按文件哈希做增量同步。支持 Forge、NeoForge、Fabric、Quilt；也提供一份通用客户端模组，四种加载器都能加载。
 
-当前版本：**v0.1.1**  
+当前版本：**v0.1.2**  
 发布页：https://github.com/lnsanes/LnSync/releases
 
 ---
