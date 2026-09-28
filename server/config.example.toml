@@ -31,6 +31,3 @@ overlay_dir = "./private"
 # github_repo = "Owner/PackName"
 # github_api = "https://api.github.com"
 # version = "v1.0.0"
-
-# 补拉 CurseForge 资源时填写
-# curseforge_api_key = ""

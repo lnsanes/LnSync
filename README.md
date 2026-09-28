@@ -14,6 +14,7 @@
 | 服务端 | `server/` → `lnsync-server` / `lnsync-server.exe` | 从 GitHub Release 拉取 Client/Server 包，构建对象库与端侧清单，对外提供 HTTP API 与管理页 |
 | 客户端 | `client/` → `lnsync*.jar` | 作为模组放入实例 `mods/`，启动早期自动检查并拉取文件 |
 | 私货 | `overlay_dir`（默认 `./private`） | 覆盖官方同名文件，可按端侧区分 |
+| 官方包调整 | `private/official-adjust.toml` | 管理页按分类排除官方文件，支持搜索 |
 
 协议要点：清单（manifest）+ sha256 对象 + `client` / `server` 端侧 + 可选令牌（玩家同步 / 开服同步 / 管理页）。
 
@@ -128,7 +129,6 @@ Linux 服务端也可在 Linux 环境或 Docker 中 `cargo build --release` 得�
 | `client_asset` | `"*Client*.zip"` | 客户端附件通配符（匹配 Release 资源名） |
 | `server_asset` | `"*Server*.zip"` | 服务端附件通配符 |
 | `loader` | `"auto"` | 加载器：`auto` / `forge` / `neoforge` / `fabric` / `quilt` |
-| `curseforge_api_key` | `""` | 可选；构建时若需补拉 CurseForge 资源再填写 |
 
 兼容旧键名（与上方等价，任选其一）：
 
@@ -194,6 +194,18 @@ private/
 
 具体端侧（仅客户端 / 仅服务端 / 两端）可在管理页维护；私货会参与重建后的清单。
 
+### 官方包调整
+
+管理页「官方包」可按目录分类浏览官方清单文件，搜索后排除或恢复；规则写入 `overlay_dir/official-adjust.toml`：
+
+```toml
+[[exclude]]
+path = "mods/SomeMod.jar"
+side = "both"   # both / client / server
+```
+
+保存并重建后，被排除的文件不会进入客户端/服务端仓库与清单。有同名私货时私货优先保留。
+
 ---
 
 ## 客户端配置（`lnsync.toml`）
@@ -233,7 +245,7 @@ update_token = "与服务端 access_token 一致"
 - 路径前缀：`/admin/ifgfsgfbijuzoxzq`  
 - 完整示例：`http://公网或局域网IP:端口/admin/ifgfsgfbijuzoxzq`  
 - 可改：仓库、标签、附件通配符、加载器、监听与对外地址、同步令牌等  
-- 可执行：重新构建、查看日志与进度、管理私货与连接信息等  
+- 可执行：重新构建、查看日志与进度、管理私货、调整官方包文件（分类/搜索排除）、连接信息等  
 - 管理令牌不会在页面回显；响应头保留 CSP、X-Frame-Options 等基础防护  
 
 ---

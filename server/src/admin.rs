@@ -253,15 +253,27 @@ pub async fn api(State(app): State<App>, request: Request<Body>) -> Response {
     if !allowed(&app, &request) {
         return admin_error(StatusCode::UNAUTHORIZED, "请先登录管理网页");
     }
-    if action == "state" || action == "tags" {
+    if action == "state" || action == "tags" || action == "official-adjust" {
         if method != axum::http::Method::GET {
-            return admin_error(StatusCode::METHOD_NOT_ALLOWED, "方法不允许");
+            if action == "official-adjust" && method == axum::http::Method::POST {
+                // fall through to POST handlers below
+            } else {
+                return admin_error(StatusCode::METHOD_NOT_ALLOWED, "方法不允许");
+            }
+        } else {
+            let body = if action == "state" {
+                state(&app)
+            } else if action == "official-adjust" {
+                let files = list_official_files(&app);
+                json!({"files": files, "categories": official_categories(&files)})
+            } else {
+                match tags(&app).await {
+                    Ok(body) => body,
+                    Err((status, detail)) => return admin_error(status, &detail),
+                }
+            };
+            return json_ok(body);
         }
-        let body = if action == "state" { state(&app) } else { match tags(&app).await {
-            Ok(body) => body,
-            Err((status, detail)) => return admin_error(status, &detail),
-        }};
-        return json_ok(body);
     }
     if method != axum::http::Method::POST {
         return admin_error(StatusCode::METHOD_NOT_ALLOWED, "方法不允许");
@@ -277,6 +289,7 @@ pub async fn api(State(app): State<App>, request: Request<Body>) -> Response {
         "private/remove" => remove_private(&app, request).await,
         "private/side" => private_side(&app, request).await,
         "private/folder" => private_folder(&app, request).await,
+        "official-adjust" => save_official_adjust(&app, request).await,
         _ => Err((StatusCode::NOT_FOUND, "页面不存在".into())),
     };
     match result {
@@ -345,6 +358,8 @@ fn state(app: &App) -> Value {
     let loader = first_cfg(&app.config, &["loader"]);
     let loader = if loader.is_empty() { "auto".into() } else { loader };
     let resolved_loader = meta.get("loader").and_then(|value| value.as_str()).unwrap_or(&loader).to_string();
+    let official_files = list_official_files(app);
+    let official_categories = official_categories(&official_files);
     json!({
         "official_version": version,
         "github_repo": first_cfg(&app.config, &["repo", "github_repo"]),
@@ -373,6 +388,8 @@ fn state(app: &App) -> Value {
         "servers": load_servers(&app.data),
         "privates": list_privates(&root),
         "private_folders": private_folders(&root),
+        "official_files": official_files,
+        "official_categories": official_categories,
         "logs": inner.logs,
     })
 }
@@ -828,6 +845,223 @@ fn side_label(side: &str) -> &'static str {
         "server" => "仅服务端",
         "both" => "两端",
         _ => "自动判定",
+    }
+}
+
+async fn save_official_adjust(app: &App, request: Request<Body>) -> Result<Value, (StatusCode, String)> {
+    {
+        let inner = app.admin.inner.lock().expect("admin");
+        if inner.busy {
+            return Err((StatusCode::CONFLICT, "正在处理上一项操作，请稍候".into()));
+        }
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), 8 << 20)
+        .await
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    let doc: Value = serde_json::from_slice(&bytes).map_err(|_| (StatusCode::BAD_REQUEST, "无效的官方包调整数据".into()))?;
+    let excludes = doc.get("excludes").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    let root = private_root(app);
+    std::fs::create_dir_all(&root).map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+    let mut out = String::from("# 官方包调整：排除的文件不会进入客户端/服务端仓库与清单。\n# side: both / client / server\n\n");
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0usize;
+    for row in excludes {
+        let path = row.get("path").and_then(|value| value.as_str()).unwrap_or("").trim().replace('\\', "/");
+        if path.is_empty() || path.contains("..") || Path::new(&path).is_absolute() {
+            continue;
+        }
+        let side = normalize_adjust_side(row.get("side").and_then(|value| value.as_str()).unwrap_or("both"));
+        let key = format!("{path}|{side}");
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push_str("[[exclude]]\n");
+        out.push_str(&format!("path = {}\n", toml_quote(&path)));
+        out.push_str(&format!("side = {}\n\n", toml_quote(side)));
+        count += 1;
+    }
+    std::fs::write(root.join("official-adjust.toml"), out).map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
+    app.admin.note(format!("已保存官方包调整规则 {count} 条"));
+    Ok(json!({"ok": true, "count": count}))
+}
+
+fn list_official_files(app: &App) -> Vec<Value> {
+    let sides = load_official_side_map(&app.data);
+    let (excluded, exclude_side) = load_official_adjust(&private_root(app));
+    let mut rows = Vec::new();
+    for (path, side) in sides {
+        if path.ends_with(".pw.toml") || path.ends_with(".side") {
+            continue;
+        }
+        let is_excluded = excluded.contains(&path);
+        rows.push(json!({
+            "path": path,
+            "side": side,
+            "category": category_of(&path),
+            "kind": kind_of(&path),
+            "excluded": is_excluded,
+            "exclude_side": if is_excluded { exclude_side.get(&path).cloned().unwrap_or_else(|| "both".into()) } else { String::new() },
+        }));
+    }
+    rows.sort_by(|a, b| {
+        let ca = a.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        let cb = b.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        ca.to_lowercase().cmp(&cb.to_lowercase()).then_with(|| {
+            let pa = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let pb = b.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            pa.to_lowercase().cmp(&pb.to_lowercase())
+        })
+    });
+    rows
+}
+
+fn official_categories(rows: &[Value]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let cat = row.get("category").and_then(|v| v.as_str()).unwrap_or("根目录").to_string();
+        if seen.insert(cat.clone()) {
+            out.push(cat);
+        }
+    }
+    out
+}
+
+fn load_official_side_map(data: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let map = fs_json(&data.join("manifests").join("official-side-map.json"));
+    if let Some(obj) = map.as_object() {
+        for (k, v) in obj {
+            out.push((k.replace('\\', "/"), v.as_str().unwrap_or("both").to_string()));
+        }
+        return out;
+    }
+    for side in ["client", "server"] {
+        let root = data.join("repos").join(side);
+        if let Ok(walk) = std::fs::read_dir(&root) {
+            collect_repo_files(&root, walk, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_repo_files(root: &Path, walk: std::fs::ReadDir, out: &mut Vec<(String, String)>) {
+    for entry in walk.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(next) = std::fs::read_dir(&path) {
+                collect_repo_files(root, next, out);
+            }
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+        if rel.ends_with(".pw.toml") || rel.ends_with(".side") {
+            continue;
+        }
+        if !out.iter().any(|(p, _)| p == &rel) {
+            out.push((rel, "both".into()));
+        }
+    }
+}
+
+fn load_official_adjust(root: &Path) -> (std::collections::HashSet<String>, std::collections::HashMap<String, String>) {
+    let mut excluded = std::collections::HashSet::new();
+    let mut sides = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(root.join("official-adjust.toml")) else {
+        return (excluded, sides);
+    };
+    let mut path = String::new();
+    let mut side = String::new();
+    let mut in_exclude = false;
+    let flush = |path: &mut String, side: &mut String, excluded: &mut std::collections::HashSet<String>, sides: &mut std::collections::HashMap<String, String>| {
+        if path.is_empty() {
+            return;
+        }
+        let p = path.replace('\\', "/");
+        let s = normalize_adjust_side(side).to_string();
+        excluded.insert(p.clone());
+        sides.insert(p, s);
+        path.clear();
+        side.clear();
+    };
+    for line in text.lines() {
+        let mut trim = line.trim();
+        if let Some(i) = trim.find('#') {
+            trim = trim[..i].trim();
+        }
+        if trim.is_empty() {
+            continue;
+        }
+        if trim == "[[exclude]]" {
+            flush(&mut path, &mut side, &mut excluded, &mut sides);
+            in_exclude = true;
+            continue;
+        }
+        if trim.starts_with('[') {
+            flush(&mut path, &mut side, &mut excluded, &mut sides);
+            in_exclude = false;
+            continue;
+        }
+        if !in_exclude {
+            continue;
+        }
+        if trim.starts_with("path") {
+            path = toml_line_value(trim);
+        } else if trim.starts_with("side") {
+            side = toml_line_value(trim);
+        }
+    }
+    flush(&mut path, &mut side, &mut excluded, &mut sides);
+    (excluded, sides)
+}
+
+fn normalize_adjust_side(side: &str) -> &'static str {
+    let s = side.trim();
+    if s.eq_ignore_ascii_case("client") {
+        "client"
+    } else if s.eq_ignore_ascii_case("server") {
+        "server"
+    } else {
+        "both"
+    }
+}
+
+fn category_of(path: &str) -> String {
+    let rel = path.replace('\\', "/");
+    match rel.find('/') {
+        Some(i) if i > 0 => rel[..i].to_string(),
+        _ => "根目录".into(),
+    }
+}
+
+fn kind_of(path: &str) -> &'static str {
+    let rel = path.replace('\\', "/").to_ascii_lowercase();
+    if rel.starts_with("mods/") && rel.ends_with(".jar") {
+        "mod"
+    } else if rel.starts_with("config/") || rel.starts_with("defaultconfigs/") {
+        "config"
+    } else if rel.starts_with("kubejs/") {
+        "kubejs"
+    } else if rel.starts_with("resourcepacks/") || rel.starts_with("shaderpacks/") {
+        "resource"
+    } else if rel.starts_with("libraries/") {
+        "library"
+    } else {
+        "other"
+    }
+}
+
+fn toml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn toml_line_value(line: &str) -> String {
+    let Some((_, raw)) = line.split_once('=') else { return String::new() };
+    let value = raw.trim();
+    if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        value[1..value.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
+    } else {
+        value.to_string()
     }
 }
 
