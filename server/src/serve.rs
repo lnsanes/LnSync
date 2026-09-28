@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path as UrlPath, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as UrlPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -107,6 +107,7 @@ pub async fn listen(addr: String, data: PathBuf, config: PathBuf) -> io::Result<
         .route("/admin/ifgfsgfbijuzoxzq/", get(admin::page))
         .route("/admin/ifgfsgfbijuzoxzq/icon.png", get(admin::icon))
         .route("/admin/ifgfsgfbijuzoxzq/api/{*action}", get(admin::api).post(admin::api))
+        .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
