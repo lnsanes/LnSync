@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -97,6 +98,10 @@ pub fn build_repos(config: &Path, admin: &super::admin::Admin) -> Result<(), Str
         &repo,
     )?;
     admin.note(format!("客户端仓库 {} 个文件，服务端仓库 {} 个文件", client_files.len(), server_files.len()));
+    let report = reclaim_storage(&data, &version, true)?;
+    if !report.is_empty() {
+        admin.note(report.summary());
+    }
     admin.note("本地仓库构建完成");
     Ok(())
 }
@@ -909,6 +914,177 @@ fn fingerprint(files: &[serde_json::Value]) -> String {
     hex::encode(Sha256::digest(parts.join("\n").as_bytes()))
 }
 
+pub struct ReclaimReport {
+    pub objects: u64,
+    pub object_bytes: u64,
+    pub cache_items: u64,
+}
+
+impl ReclaimReport {
+    pub fn is_empty(&self) -> bool {
+        self.objects == 0 && self.cache_items == 0
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "已回收对象库 {} 个（{}），下载缓存 {} 项",
+            self.objects,
+            format_size(self.object_bytes as i64),
+            self.cache_items
+        )
+    }
+}
+
+pub fn reclaim_storage(data: &Path, current_version: &str, drop_extracts: bool) -> Result<ReclaimReport, String> {
+    let live = live_object_hashes(data);
+    let mut cache_items = drop_stale_packs(&data.join("packs"), &live);
+    let (objects, object_bytes) = prune_objects(&data.join("objects"), &live)?;
+    cache_items += prune_cache(&data.join("cache"), current_version, drop_extracts)?;
+    Ok(ReclaimReport { objects, object_bytes, cache_items })
+}
+
+fn live_object_hashes(data: &Path) -> HashSet<String> {
+    let mut live = HashSet::new();
+    for name in ["client.json", "server.json"] {
+        add_manifest_hashes(&data.join("manifests").join(name), &mut live);
+    }
+    live
+}
+
+fn add_manifest_hashes(path: &Path, live: &mut HashSet<String>) {
+    let Ok(buf) = fs::read(path) else {
+        return;
+    };
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&buf) else {
+        return;
+    };
+    let Some(files) = doc.get("files").and_then(|value| value.as_array()) else {
+        return;
+    };
+    for file in files {
+        if let Some(sha) = file.get("sha256").and_then(|value| value.as_str()) {
+            if is_object_hash(sha) {
+                live.insert(sha.to_ascii_lowercase());
+            }
+        }
+    }
+}
+
+fn drop_stale_packs(packs: &Path, live: &HashSet<String>) -> u64 {
+    let Ok(entries) = fs::read_dir(packs) else {
+        return 0;
+    };
+    let mut removed = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("build-") {
+            let _ = fs::remove_file(&path);
+            removed += 1;
+            continue;
+        }
+        if !name.ends_with(".json") || path.is_dir() {
+            continue;
+        }
+        let keep = fs::read(&path).ok().and_then(|buf| serde_json::from_slice::<serde_json::Value>(&buf).ok()).and_then(|doc| {
+            doc.get("sha256").and_then(|value| value.as_str()).map(|sha| live.contains(&sha.to_ascii_lowercase()))
+        }).unwrap_or(false);
+        if keep {
+            continue;
+        }
+        let _ = fs::remove_file(&path);
+        removed += 1;
+    }
+    removed
+}
+
+fn prune_objects(objects: &Path, live: &HashSet<String>) -> Result<(u64, u64), String> {
+    if !objects.is_dir() || live.is_empty() {
+        return Ok((0, 0));
+    }
+    let mut removed = 0u64;
+    let mut bytes = 0u64;
+    let prefixes = fs::read_dir(objects).map_err(|error| error.to_string())?;
+    for prefix in prefixes.flatten() {
+        let dir = prefix.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let files = match fs::read_dir(&dir) {
+            Ok(files) => files,
+            Err(_) => continue,
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = file.file_name().to_string_lossy().to_ascii_lowercase();
+            if is_object_hash(&name) && !live.contains(&name) {
+                bytes += fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                let _ = fs::remove_file(&path);
+                removed += 1;
+            }
+        }
+        let _ = fs::remove_dir(&dir);
+    }
+    Ok((removed, bytes))
+}
+
+fn prune_cache(cache: &Path, current_version: &str, drop_extracts: bool) -> Result<u64, String> {
+    if !cache.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0u64;
+    let versions = fs::read_dir(cache).map_err(|error| error.to_string())?;
+    for entry in versions.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !current_version.is_empty() && name != current_version {
+            let _ = fs::remove_dir_all(&path);
+            removed += 1;
+            continue;
+        }
+        removed += prune_cache_dir(&path, drop_extracts)?;
+    }
+    Ok(removed)
+}
+
+fn prune_cache_dir(dir: &Path, drop_extracts: bool) -> Result<u64, String> {
+    let mut removed = 0u64;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(0),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let drop = name == "packwiz"
+            || name.ends_with(".partial")
+            || name.ends_with(".cdrtmp")
+            || name.ends_with(".parts")
+            || (drop_extracts && (name == "client-raw" || name == "server-raw" || name.ends_with(".complete")));
+        if !drop {
+            continue;
+        }
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn is_object_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) && !value.contains(['/', '.', '\\'])
+}
+
 fn store_object(objects: &Path, digest: &str, source: &Path) -> Result<(), String> {
     let dest = objects.join(&digest[..2]).join(digest);
     if dest.is_file() {
@@ -1466,4 +1642,89 @@ fn chrono_stamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs()).unwrap_or(0);
     seconds.to_string()
+}
+
+#[cfg(test)]
+mod reclaim_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(name: &str) -> PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("{name}-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn hex64(ch: char) -> String {
+        std::iter::repeat(ch).take(64).collect()
+    }
+
+    fn put_object(root: &Path, digest: &str, bytes: &[u8]) {
+        let path = root.join("objects").join(&digest[..2]).join(digest);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn reclaim_drops_orphans_old_cache_and_packwiz() {
+        let dir = scratch("lnsync-reclaim");
+        let live = hex64('b');
+        let orphan = hex64('a');
+        put_object(&dir, &live, b"keep");
+        put_object(&dir, &orphan, b"drop");
+        fs::create_dir_all(dir.join("manifests")).unwrap();
+        fs::write(
+            dir.join("manifests").join("client.json"),
+            serde_json::json!({"files":[{"path":"mods/keep.jar","sha256": live}]}).to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join("manifests").join("server.json"), "{\"files\":[]}").unwrap();
+        fs::create_dir_all(dir.join("packs")).unwrap();
+        fs::write(
+            dir.join("packs").join("stale.json"),
+            serde_json::json!({"sha256": orphan}).to_string(),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("cache").join("v-old").join("packwiz")).unwrap();
+        fs::write(dir.join("cache").join("v-old").join("Client-v-old.zip"), b"old").unwrap();
+        let current = dir.join("cache").join("v-now");
+        fs::create_dir_all(current.join("packwiz")).unwrap();
+        fs::write(current.join("packwiz").join("oldpack.zip"), b"res").unwrap();
+        fs::write(current.join("Client-v-now.zip"), b"keepzip").unwrap();
+        fs::create_dir_all(current.join("client-raw")).unwrap();
+        fs::write(current.join("client-raw").join("keep.txt"), b"extract").unwrap();
+
+        let report = reclaim_storage(&dir, "v-now", true).unwrap();
+        assert!(report.objects >= 1, "should delete orphan object");
+        assert!(!dir.join("objects").join(&orphan[..2]).join(&orphan).is_file());
+        assert!(dir.join("objects").join(&live[..2]).join(&live).is_file());
+        assert!(!dir.join("cache").join("v-old").exists());
+        assert!(!current.join("packwiz").exists());
+        assert!(current.join("Client-v-now.zip").is_file());
+        assert!(!current.join("client-raw").exists());
+        assert!(!dir.join("packs").join("stale.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaim_keeps_extracts_when_disabled() {
+        let dir = scratch("lnsync-reclaim-keep");
+        let live = hex64('c');
+        put_object(&dir, &live, b"keep");
+        fs::create_dir_all(dir.join("manifests")).unwrap();
+        fs::write(
+            dir.join("manifests").join("client.json"),
+            serde_json::json!({"files":[{"path":"a","sha256": live}]}).to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join("manifests").join("server.json"), "{\"files\":[]}").unwrap();
+        let raw = dir.join("cache").join("v-now").join("client-raw");
+        fs::create_dir_all(&raw).unwrap();
+        fs::write(raw.join("keep.txt"), b"x").unwrap();
+        reclaim_storage(&dir, "v-now", false).unwrap();
+        assert!(raw.join("keep.txt").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
