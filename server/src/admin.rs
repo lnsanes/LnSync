@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -445,7 +444,7 @@ async fn version(app: &App, request: Request<Body>) -> Result<Value, (StatusCode
     struct BodyTag { tag: Option<String> }
     let bytes = axum::body::to_bytes(request.into_body(), 1 << 20).await.unwrap_or_default();
     let tag = serde_json::from_slice::<BodyTag>(&bytes).ok().and_then(|body| body.tag).unwrap_or_default();
-    let tag = tag.trim().to_string();
+    let tag = super::build::safe_release_tag(tag.trim()).map_err(|error| (StatusCode::CONFLICT, error))?;
     if tag.is_empty() {
         return Err((StatusCode::CONFLICT, "版本不能为空".into()));
     }
@@ -470,16 +469,14 @@ async fn source(app: &App, request: Request<Body>) -> Result<Value, (StatusCode,
     let bytes = axum::body::to_bytes(request.into_body(), 1 << 20).await.unwrap_or_default();
     let body: BodySource = serde_json::from_slice(&bytes).map_err(|error| (StatusCode::CONFLICT, error.to_string()))?;
     if let Some(repo) = body.repo {
-        let repo = repo.trim().to_string();
-        if repo.is_empty() || !repo.contains('/') {
-            return Err((StatusCode::CONFLICT, "repo 格式应为 Owner/Name".into()));
-        }
+        let repo = super::build::safe_github_repo(repo.trim()).map_err(|error| (StatusCode::CONFLICT, error))?;
         set_field(&app.config, "repo", &repo).map_err(|error| (StatusCode::CONFLICT, error))?;
         set_field(&app.config, "github_repo", &repo).map_err(|error| (StatusCode::CONFLICT, error))?;
     }
     if let Some(api) = body.api {
         let api = api.trim().to_string();
         if !api.is_empty() {
+            let api = super::build::safe_github_api(&api).map_err(|error| (StatusCode::CONFLICT, error))?;
             set_field(&app.config, "api", &api).map_err(|error| (StatusCode::CONFLICT, error))?;
             set_field(&app.config, "github_api", &api).map_err(|error| (StatusCode::CONFLICT, error))?;
         }
@@ -487,6 +484,7 @@ async fn source(app: &App, request: Request<Body>) -> Result<Value, (StatusCode,
     if let Some(tag) = body.tag {
         let tag = tag.trim().to_string();
         if !tag.is_empty() {
+            let tag = super::build::safe_release_tag(&tag).map_err(|error| (StatusCode::CONFLICT, error))?;
             set_field(&app.config, "tag", &tag).map_err(|error| (StatusCode::CONFLICT, error))?;
             set_field(&app.config, "version", &tag).map_err(|error| (StatusCode::CONFLICT, error))?;
         }
@@ -931,10 +929,12 @@ fn load_official_side_map(data: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let map = fs_json(&data.join("manifests").join("official-side-map.json"));
     if let Some(obj) = map.as_object() {
-        for (k, v) in obj {
-            out.push((k.replace('\\', "/"), v.as_str().unwrap_or("both").to_string()));
+        if !obj.is_empty() {
+            for (k, v) in obj {
+                out.push((k.replace('\\', "/"), v.as_str().unwrap_or("both").to_string()));
+            }
+            return out;
         }
-        return out;
     }
     for side in ["client", "server"] {
         let root = data.join("repos").join(side);
@@ -1109,12 +1109,24 @@ fn nonempty_cfg(config: &Path, key: &str, fallback: &str) -> String {
 }
 
 fn set_field(config: &Path, key: &str, value: &str) -> Result<(), String> {
+    if value.as_bytes().iter().any(|byte| matches!(byte, b'\n' | b'\r' | 0)) {
+        return Err("配置值不能包含换行".into());
+    }
+    if key != "port" && value.contains('"') {
+        return Err("配置值不能包含引号".into());
+    }
+    match key {
+        "version" | "tag" => { super::build::safe_release_tag(value)?; }
+        "github_api" | "api" => { super::build::safe_github_api(value)?; }
+        "github_repo" | "repo" => { super::build::safe_github_repo(value)?; }
+        _ => {}
+    }
     let text = std::fs::read_to_string(config).unwrap_or_default();
     let mut lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
     let rendered = if key == "port" {
         format!("{key} = {value}")
     } else {
-        format!("{key} = \"{}\"", value.replace('"', ""))
+        format!("{key} = \"{value}\"")
     };
     let mut found = false;
     for line in &mut lines {
@@ -1128,11 +1140,19 @@ fn set_field(config: &Path, key: &str, value: &str) -> Result<(), String> {
     if !found {
         lines.push(rendered);
     }
-    let mut file = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(config).map_err(|error| error.to_string())?;
-    file.write_all(lines.join("\n").as_bytes()).map_err(|error| error.to_string())?;
-    if !text.ends_with('\n') && !lines.is_empty() {
-        file.write_all(b"\n").map_err(|error| error.to_string())?;
+    let mut body = lines.join("\n");
+    if !body.ends_with('\n') && !body.is_empty() {
+        body.push('\n');
     }
+    let tmp = config.with_extension("toml.tmp");
+    std::fs::write(&tmp, body.as_bytes()).map_err(|error| error.to_string())?;
+    if config.exists() {
+        let _ = std::fs::remove_file(config);
+    }
+    std::fs::rename(&tmp, config).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        error.to_string()
+    })?;
     Ok(())
 }
 

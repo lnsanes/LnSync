@@ -7,12 +7,12 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 pub fn build_repos(config: &Path, admin: &super::admin::Admin) -> Result<(), String> {
-    let version = first_field(config, &["tag", "version"]);
+    let version = safe_release_tag(&first_field(config, &["tag", "version"]))?;
     if version.is_empty() {
         return Err("source.tag / version 未配置，例如 v1.0.0".into());
     }
-    let repo = nonempty(first_field(config, &["repo", "github_repo"]), "Owner/PackName");
-    let api = nonempty(first_field(config, &["api", "github_api"]), "https://api.github.com");
+    let repo = safe_github_repo(&nonempty(first_field(config, &["repo", "github_repo"]), "Owner/PackName"))?;
+    let api = safe_github_api(&nonempty(first_field(config, &["api", "github_api"]), "https://api.github.com"))?;
     let client_glob = nonempty(field(config, "client_asset"), "*Client*.zip");
     let server_glob = nonempty(field(config, "server_asset"), "*Server*.zip");
     let loader_cfg = nonempty(field(config, "loader"), "auto");
@@ -41,8 +41,8 @@ pub fn build_repos(config: &Path, admin: &super::admin::Admin) -> Result<(), Str
         .unwrap_or_default();
     let client_asset = find_asset(&release, &client_glob)?;
     let server_asset = find_asset(&release, &server_glob)?;
-    let client_name = client_asset.get("name").and_then(|value| value.as_str()).unwrap_or("client.zip");
-    let server_name = server_asset.get("name").and_then(|value| value.as_str()).unwrap_or("server.zip");
+    let client_name = asset_basename(client_asset.get("name").and_then(|value| value.as_str()).unwrap_or("client.zip"))?;
+    let server_name = asset_basename(server_asset.get("name").and_then(|value| value.as_str()).unwrap_or("server.zip"))?;
     let client_zip = cache.join(client_name);
     let server_zip = cache.join(server_name);
     download_asset(admin, &client_asset, &client_zip)?;
@@ -135,12 +135,41 @@ fn download_asset(admin: &super::admin::Admin, asset: &serde_json::Value, dest: 
     let name = asset.get("name").and_then(|value| value.as_str()).unwrap_or("asset.zip");
     let url = asset.get("browser_download_url").and_then(|value| value.as_str()).ok_or("附件没有下载地址")?;
     let size = asset.get("size").and_then(|value| value.as_u64()).unwrap_or(0);
+    let digest = asset_sha256(asset);
     if dest.is_file() && fs::metadata(dest).map(|meta| meta.len() == size && size > 0).unwrap_or(false) {
+        verify_asset(dest, name, size, digest.as_deref())?;
         admin.note(format!("沿用已下载的 {name}"));
         return Ok(());
     }
     admin.note(format!("下载 {name}"));
-    stream_download(admin, url, dest, name, size as i64, "", 0, 1)
+    stream_download(admin, url, dest, name, size as i64, "", 0, 1)?;
+    verify_asset(dest, name, size, digest.as_deref())
+}
+
+fn asset_sha256(asset: &serde_json::Value) -> Option<String> {
+    let digest = asset.get("digest").and_then(|value| value.as_str())?;
+    let hex = digest.split_once(':').map(|(_, rest)| rest).unwrap_or(digest).trim();
+    if is_object_hash(hex) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn verify_asset(path: &Path, name: &str, size: u64, digest: Option<&str>) -> Result<(), String> {
+    let actual = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if size > 0 && actual != size {
+        let _ = fs::remove_file(path);
+        return Err(format!("{name} 大小与 GitHub 声明不一致"));
+    }
+    if let Some(expected) = digest {
+        let got = file_digest::<Sha256>(path).unwrap_or_default();
+        if !got.eq_ignore_ascii_case(expected) {
+            let _ = fs::remove_file(path);
+            return Err(format!("{name} 哈希与 GitHub digest 不一致"));
+        }
+    }
+    Ok(())
 }
 
 fn extract_zip(admin: &super::admin::Admin, zip_path: &Path, dest: &Path, label: &str) -> Result<(), String> {
@@ -277,26 +306,24 @@ fn pull_listed(admin: &super::admin::Admin, config: &Path, client_root: &Path, s
         } else {
             job.rel.rsplit_once('/').map(|(dir, _)| dir).filter(|dir| !dir.is_empty()).unwrap_or_else(|| folder_for(&filename))
         };
-        let rel = format!("{folder}/{filename}");
+        let Some(rel) = safe_listed_rel(folder, &filename) else { continue };
         let dest = client_dir.join(&rel);
         if dest.is_file() && hash_matches(&dest, &job.hash_format, &job.hash) {
             continue;
         }
-        // 无真实文件名时无法拼 forgecdn；无 Key 时官方 API 也不可用。
-        // 若客户端 mods 已由服务端包填充，跳过这类 CurseForge 占位项。
         if filename.starts_with("cf-") && known.map(|item| item.0.as_str()).unwrap_or("").is_empty() {
-            let has_direct = job.url.starts_with("http") && !job.url.contains("www.curseforge.com");
+            let has_direct = job.url.starts_with("https://") && !job.url.contains("www.curseforge.com");
             if !has_direct && (key.is_empty() || seeded_mods) {
                 skipped_cf += 1;
                 continue;
             }
         }
         let mut urls = Vec::new();
-        if job.url.starts_with("http") && !job.url.contains("www.curseforge.com") {
+        if job.url.starts_with("https://") && !job.url.contains("www.curseforge.com") {
             urls.push(job.url.clone());
         }
         if let Some((_, download)) = known {
-            if download.starts_with("http") {
+            if download.starts_with("https://") {
                 urls.push(download.clone());
             }
         }
@@ -522,7 +549,83 @@ fn folder_for(name: &str) -> &'static str {
     else { "mods" }
 }
 
-fn curse_key(_config: &Path) -> String {
+fn safe_listed_rel(folder: &str, filename: &str) -> Option<String> {
+    let folder = folder.replace('\\', "/");
+    if !matches!(folder.as_str(), "mods" | "resourcepacks" | "shaderpacks" | "tacz") {
+        return None;
+    }
+    let filename = filename.replace('\\', "/");
+    let filename = filename.rsplit('/').next().unwrap_or(&filename);
+    if filename.is_empty() || filename.contains("..") || filename.contains('\0') || filename.contains(':') {
+        return None;
+    }
+    Some(format!("{folder}/{filename}"))
+}
+
+fn asset_basename(name: &str) -> Result<String, String> {
+    let name = name.replace('\\', "/");
+    let base = name.rsplit('/').next().unwrap_or(name.as_str());
+    if base.is_empty() || base.contains("..") {
+        return Err("附件名无效".into());
+    }
+    Ok(base.to_string())
+}
+
+pub(crate) fn safe_release_tag(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.len() > 128 {
+        return Err("版本号过长".into());
+    }
+    if !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_')) {
+        return Err("版本号含非法字符".into());
+    }
+    Ok(value.to_string())
+}
+
+pub(crate) fn safe_github_repo(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let mut parts = value.split('/');
+    let owner = parts.next().unwrap_or("");
+    let repo = parts.next().unwrap_or("");
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() {
+        return Err("github_repo 必须是 owner/repo".into());
+    }
+    let ok = |part: &str| part.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    if !ok(owner) || !ok(repo) {
+        return Err("github_repo 含非法字符".into());
+    }
+    Ok(format!("{owner}/{repo}"))
+}
+
+pub(crate) fn safe_github_api(value: &str) -> Result<String, String> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Ok("https://api.github.com".into());
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower == "https://api.github.com" {
+        return Ok("https://api.github.com".into());
+    }
+    if GITHUB_PROXIES.iter().any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()) && lower.contains("api.github.com")) {
+        return Ok(value.to_string());
+    }
+    Err("github_api 只允许 https://api.github.com 或已知 GitHub 反代".into())
+}
+
+fn curse_key(config: &Path) -> String {
+    if let Ok(value) = std::env::var("CURSEFORGE_API_KEY") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    let from_cfg = field(config, "curseforge_api_key");
+    if !from_cfg.is_empty() {
+        return from_cfg;
+    }
     embedded_curse_key()
 }
 
@@ -615,7 +718,7 @@ fn collect_github_pw(admin: &super::admin::Admin, api: &str, repo: &str, version
         for row in rows {
             let name = row.get("name").and_then(|value| value.as_str()).unwrap_or("");
             let download = row.get("download_url").and_then(|value| value.as_str()).unwrap_or("");
-            if !name.ends_with(".pw.toml") || !download.starts_with("http") { continue; }
+            if !name.ends_with(".pw.toml") || !download.starts_with("https://") { continue; }
             let meta = match http_get(admin, download) {
                 Ok(meta) => meta,
                 Err(error) => {
@@ -948,7 +1051,27 @@ fn live_object_hashes(data: &Path) -> HashSet<String> {
     for name in ["client.json", "server.json"] {
         add_manifest_hashes(&data.join("manifests").join(name), &mut live);
     }
+    add_pack_hashes(&data.join("packs"), &mut live);
     live
+}
+
+fn add_pack_hashes(packs: &Path, live: &mut HashSet<String>) {
+    let Ok(entries) = fs::read_dir(packs) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".json") || name.starts_with("build-") || path.is_dir() {
+            continue;
+        }
+        let Ok(buf) = fs::read(&path) else { continue };
+        let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&buf) else { continue };
+        if let Some(sha) = doc.get("sha256").and_then(|value| value.as_str()) {
+            if is_object_hash(sha) {
+                live.insert(sha.to_ascii_lowercase());
+            }
+        }
+    }
 }
 
 fn add_manifest_hashes(path: &Path, live: &mut HashSet<String>) {
@@ -1063,8 +1186,7 @@ fn prune_cache_dir(dir: &Path, drop_extracts: bool) -> Result<u64, String> {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let drop = name == "packwiz"
-            || name.ends_with(".partial")
+        let drop = name.ends_with(".partial")
             || name.ends_with(".cdrtmp")
             || name.ends_with(".parts")
             || (drop_extracts && (name == "client-raw" || name == "server-raw" || name.ends_with(".complete")));
@@ -1246,15 +1368,9 @@ fn keep_proxied(prefix: &str, location: &str) -> String {
 fn mirror_urls(url: &str) -> Vec<String> {
     let mut urls = Vec::new();
     if is_github(url) && !already_proxied(url) {
-        let mirrors_first = !url.to_ascii_lowercase().contains("api.github.com/");
-        if !mirrors_first {
-            urls.push(url.to_string());
-        }
+        urls.push(url.to_string());
         for prefix in GITHUB_PROXIES {
             urls.push(format!("{prefix}{url}"));
-        }
-        if mirrors_first {
-            urls.push(url.to_string());
         }
     } else {
         urls.push(url.to_string());
@@ -1292,7 +1408,11 @@ pub fn fetch_text(url: &str, admin: Option<&super::admin::Admin>) -> Result<Stri
 }
 
 fn stream_download(admin: &super::admin::Admin, url: &str, dest: &Path, label: &str, expected: i64, api_key: &str, index: i64, count: i64) -> Result<(), String> {
-    let urls = rank_urls(admin, mirror_urls(url), api_key);
+    let urls = if is_github(url) {
+        mirror_urls(url)
+    } else {
+        rank_urls(admin, mirror_urls(url), api_key)
+    };
     let mut last = "下载失败".to_string();
     for (attempt, candidate) in urls.iter().enumerate() {
         match stream_once(admin, candidate, dest, label, expected, api_key, index, count) {
@@ -1668,12 +1788,14 @@ mod reclaim_tests {
     }
 
     #[test]
-    fn reclaim_drops_orphans_old_cache_and_packwiz() {
+    fn reclaim_keeps_pack_objects_and_current_packwiz() {
         let dir = scratch("lnsync-reclaim");
         let live = hex64('b');
         let orphan = hex64('a');
+        let pack = hex64('d');
         put_object(&dir, &live, b"keep");
         put_object(&dir, &orphan, b"drop");
+        put_object(&dir, &pack, b"packzip");
         fs::create_dir_all(dir.join("manifests")).unwrap();
         fs::write(
             dir.join("manifests").join("client.json"),
@@ -1683,8 +1805,13 @@ mod reclaim_tests {
         fs::write(dir.join("manifests").join("server.json"), "{\"files\":[]}").unwrap();
         fs::create_dir_all(dir.join("packs")).unwrap();
         fs::write(
+            dir.join("packs").join("live.json"),
+            serde_json::json!({"sha256": pack}).to_string(),
+        )
+        .unwrap();
+        fs::write(
             dir.join("packs").join("stale.json"),
-            serde_json::json!({"sha256": orphan}).to_string(),
+            serde_json::json!({"sha256": "not-a-hash"}).to_string(),
         )
         .unwrap();
         fs::create_dir_all(dir.join("cache").join("v-old").join("packwiz")).unwrap();
@@ -1700,11 +1827,13 @@ mod reclaim_tests {
         assert!(report.objects >= 1, "should delete orphan object");
         assert!(!dir.join("objects").join(&orphan[..2]).join(&orphan).is_file());
         assert!(dir.join("objects").join(&live[..2]).join(&live).is_file());
+        assert!(dir.join("objects").join(&pack[..2]).join(&pack).is_file());
+        assert!(dir.join("packs").join("live.json").is_file());
+        assert!(!dir.join("packs").join("stale.json").exists());
         assert!(!dir.join("cache").join("v-old").exists());
-        assert!(!current.join("packwiz").exists());
+        assert!(current.join("packwiz").exists());
         assert!(current.join("Client-v-now.zip").is_file());
         assert!(!current.join("client-raw").exists());
-        assert!(!dir.join("packs").join("stale.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

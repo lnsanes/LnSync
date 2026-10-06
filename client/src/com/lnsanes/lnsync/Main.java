@@ -70,6 +70,9 @@ public final class Main {
         String expectSha = Json.str(job, "sha256");
         String token = Json.str(job, "token");
         long size = Json.lng(job, "size");
+        if (expectSha.isBlank()) {
+            throw new IllegalStateException("fetch-job 缺少 sha256");
+        }
         java.net.http.HttpRequest.Builder request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
                 .header("User-Agent", "lnsync-client")
                 .timeout(java.time.Duration.ofMinutes(30));

@@ -84,6 +84,13 @@ final class Policy {
         if (PackPaths.protectedLocal(rel)) {
             return false;
         }
+        if (PackPaths.configLike(rel)) {
+            String previous = syncedHashes == null ? null : syncedHashes.get(rel);
+            if (previous == null) {
+                return localSha == null;
+            }
+            return localSha.equals(previous);
+        }
         if (!"server".equals(side)) {
             return true;
         }

@@ -30,8 +30,11 @@ final class Fs {
         while (normalized.startsWith("./")) {
             normalized = normalized.substring(2);
         }
-        if (normalized.startsWith("/")) {
+        while (normalized.startsWith("/")) {
             normalized = normalized.substring(1);
+        }
+        while (normalized.contains("//")) {
+            normalized = normalized.replace("//", "/");
         }
         return normalized;
     }
@@ -40,16 +43,31 @@ final class Fs {
         if (path == null || path.isBlank() || path.indexOf('\0') >= 0) {
             return true;
         }
+        if (path.startsWith("/") || path.startsWith("\\")) {
+            return true;
+        }
         String normalized = posix(path);
         if (normalized.isBlank()) {
             return true;
         }
         for (String part : normalized.split("/")) {
-            if ("..".equals(part) || part.contains(":")) {
+            if (part.isEmpty() || ".".equals(part) || "..".equals(part) || part.contains(":")) {
                 return true;
             }
         }
         return false;
+    }
+
+    static Path resolveInside(Path instance, String rel) throws IOException {
+        if (unsafePath(rel)) {
+            throw new IOException("非法路径 " + rel);
+        }
+        Path root = instance.toAbsolutePath().normalize();
+        Path target = root.resolve(rel).toAbsolutePath().normalize();
+        if (!target.startsWith(root)) {
+            throw new IOException("路径跳出实例目录 " + rel);
+        }
+        return target;
     }
 
     static String sha256Hex(String digest) {

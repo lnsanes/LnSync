@@ -1,7 +1,6 @@
 package com.lnsanes.lnsync;
 
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.Map;
@@ -19,7 +18,7 @@ final class Connections {
         }
         id = UUID.randomUUID().toString();
         state.put("instance_id", id);
-        Files.writeString(instance.resolve("lnsync-state.json"), Json.stringify(state));
+        Sync.writeState(instance, state);
         return id;
     }
 

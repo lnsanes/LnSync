@@ -24,6 +24,14 @@ final class Json {
         return new ArrayList<>();
     }
 
+    @SuppressWarnings("unchecked")
+    static List<Object> requiredArray(Object value, String name) {
+        if (value instanceof List<?> list) {
+            return (List<Object>) list;
+        }
+        throw new IllegalStateException("清单缺少 " + name + " 数组");
+    }
+
     static String str(Map<String, Object> object, String key) {
         Object value = object.get(key);
         return value == null ? "" : String.valueOf(value);

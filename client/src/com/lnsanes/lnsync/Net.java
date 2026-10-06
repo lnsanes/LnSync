@@ -450,7 +450,8 @@ final class Net {
             int lanes = 0;
             String laneHeader = null;
             for (Map.Entry<String, String> entry : headers.entrySet()) {
-                if ("x-cdr-lanes".equalsIgnoreCase(entry.getKey())) {
+                if ("x-lnsync-lanes".equalsIgnoreCase(entry.getKey())
+                        || "x-cdr-lanes".equalsIgnoreCase(entry.getKey())) {
                     laneHeader = entry.getValue();
                 }
             }
@@ -510,6 +511,21 @@ final class Net {
                 throw new IllegalStateException("下载失败: " + code);
             }
             boolean append = resume && existing > 0 && code == 206;
+            if (append) {
+                String contentRange = conn.getHeaderField("Content-Range");
+                if (contentRange != null && contentRange.toLowerCase(java.util.Locale.ROOT).startsWith("bytes ")) {
+                    String spec = contentRange.substring(6).trim();
+                    int slash = spec.indexOf('/');
+                    String range = slash >= 0 ? spec.substring(0, slash) : spec;
+                    int dash = range.indexOf('-');
+                    if (dash > 0) {
+                        long start = Long.parseLong(range.substring(0, dash).trim());
+                        if (start != existing) {
+                            throw new IllegalStateException("断点续传起点不匹配");
+                        }
+                    }
+                }
+            }
             if (resume && existing > 0 && code == 200) {
                 Files.deleteIfExists(destination);
                 existing = 0;
@@ -835,8 +851,14 @@ final class Net {
     }
 
     private static boolean insecureSsl() {
-        return "true".equalsIgnoreCase(System.getProperty("cdr.ssl.insecure"))
-                || "1".equals(System.getenv("CDR_SSL_INSECURE"));
+        boolean on = "true".equalsIgnoreCase(System.getProperty("cdr.ssl.insecure"))
+                || "true".equalsIgnoreCase(System.getProperty("lnsync.ssl.insecure"))
+                || "1".equals(System.getenv("CDR_SSL_INSECURE"))
+                || "1".equals(System.getenv("LNSYNC_SSL_INSECURE"));
+        if (on) {
+            System.err.println("[LnSync] 警告: TLS 证书校验已关闭，更新通道可被中间人篡改");
+        }
+        return on;
     }
 
     private static void deletePartFiles(Path destination) {
@@ -846,7 +868,14 @@ final class Net {
         String name = destination.getFileName().toString();
         try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(destination.getParent(), name + ".p*")) {
             for (Path part : stream) {
-                Files.deleteIfExists(part);
+                String partName = part.getFileName().toString();
+                if (!partName.startsWith(name + ".p")) {
+                    continue;
+                }
+                String tail = partName.substring(name.length() + 2);
+                if (!tail.isEmpty() && tail.chars().allMatch(Character::isDigit)) {
+                    Files.deleteIfExists(part);
+                }
             }
         } catch (Exception ignored) {
             // leftover parts are optional

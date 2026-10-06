@@ -118,7 +118,8 @@ final class Sync {
         Map<String, Object> json(String method, String path, Object payload) throws Exception {
             HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(base + path))
                     .header("Accept", "application/json")
-                    .header("User-Agent", "lnsync-client");
+                    .header("User-Agent", "lnsync-client")
+                    .timeout(Duration.ofSeconds(45));
             identity(builder);
             if (payload == null) {
                 builder.method(method, HttpRequest.BodyPublishers.noBody());
@@ -349,7 +350,30 @@ final class Sync {
         if (!Files.isRegularFile(statePath)) {
             return Json.map();
         }
-        return Json.object(Json.parse(Files.readString(statePath)));
+        try {
+            return Json.object(Json.parse(Files.readString(statePath)));
+        } catch (Exception error) {
+            try {
+                Files.copy(statePath, instanceDir.resolve("lnsync-state.json.bak"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (Exception ignored) {
+                // keep going with empty state
+            }
+            System.err.println("[LnSync] 状态文件损坏，已忽略: " + error.getMessage());
+            return Json.map();
+        }
+    }
+
+    static void writeState(Path instanceDir, Map<String, Object> next) throws Exception {
+        Path target = instanceDir.resolve("lnsync-state.json");
+        Path tmp = instanceDir.resolve("lnsync-state.json.tmp");
+        Files.writeString(tmp, Json.stringify(next));
+        try {
+            Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+            Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 
     static List<Object> scan(Path instanceDir, List<Object> remoteFiles, List<String> managedPaths) throws Exception {
@@ -362,10 +386,10 @@ final class Sync {
         candidates.addAll(managedPaths);
         for (String relRaw : candidates) {
             String rel = Fs.posix(relRaw);
-            if (!seen.add(rel)) {
+            if (!seen.add(rel) || Fs.unsafePath(rel)) {
                 continue;
             }
-            Path path = instanceDir.resolve(rel);
+            Path path = Fs.resolveInside(instanceDir, rel);
             if (!Files.isRegularFile(path)) {
                 continue;
             }
@@ -374,7 +398,7 @@ final class Sync {
             row.put("sha256", Fs.sha256(path));
             row.put("size", Files.size(path));
             if (PackPaths.taggedTemplate(rel)) {
-                row.put("managed_tag", PackPaths.hasManagedTag(Files.readString(path)));
+                row.put("managed_tag", PackPaths.hasManagedTag(readLoose(path)));
                 row.put("keep_local", Files.isRegularFile(instanceDir.resolve(PackPaths.SERVER_KEEP)));
             }
             local.add(row);
@@ -400,7 +424,7 @@ final class Sync {
         }
         progress.accept("正在拉取远程清单");
         Map<String, Object> remote = client.json("GET", "api/manifest?side=" + side, null);
-        List<Object> remoteFiles = Json.array(remote.get("files"));
+        List<Object> remoteFiles = Json.requiredArray(remote.get("files"), "files");
         List<Object> localFiles = scan(instanceDir, remoteFiles, managedPaths);
         Map<String, Map<String, Object>> localByPath = new LinkedHashMap<>();
         for (Object item : localFiles) {
@@ -487,17 +511,32 @@ final class Sync {
         for (Object item : remoteFiles) {
             remotePathSet.add(Fs.posix(Json.str(Json.object(item), "path")));
         }
+        int wouldDelete = 0;
         for (String rel : managedPaths) {
             if (remotePathSet.contains(rel) || Fs.unsafePath(rel) || !Policy.shouldDeleteLocal(rel, managed)) {
                 continue;
             }
-            Path target = instanceDir.resolve(rel);
+            Path target = Fs.resolveInside(instanceDir, rel);
             if (Files.isRegularFile(target)) {
-                progress.accept("更新器服务器已删除，正在移除 " + rel);
-                Files.delete(target);
-                applied.add(Map.of("path", rel, "action", "delete"));
+                wouldDelete++;
             }
-            syncedHashes.remove(rel);
+        }
+        if ((!remoteFiles.isEmpty() || managedPaths.isEmpty())
+                && (managedPaths.size() < 8 || wouldDelete * 2 < managedPaths.size())) {
+            for (String rel : managedPaths) {
+                if (remotePathSet.contains(rel) || Fs.unsafePath(rel) || !Policy.shouldDeleteLocal(rel, managed)) {
+                    continue;
+                }
+                Path target = Fs.resolveInside(instanceDir, rel);
+                if (Files.isRegularFile(target)) {
+                    progress.accept("更新器服务器已删除，正在移除 " + rel);
+                    Files.delete(target);
+                    applied.add(Map.of("path", rel, "action", "delete"));
+                }
+                syncedHashes.remove(rel);
+            }
+        } else if (wouldDelete > 0) {
+            throw new IllegalStateException("远端清单异常或删除比例过高，已拒绝同步以免清空实例");
         }
         List<String> remotePaths = new ArrayList<>();
         Map<String, String> remoteHashes = new LinkedHashMap<>();
@@ -548,7 +587,14 @@ final class Sync {
         } else if (!instanceId.isBlank()) {
             next.put("instance_id", instanceId);
         }
-        Files.writeString(instanceDir.resolve("lnsync-state.json"), Json.stringify(next));
+        try {
+            Map<String, Object> status = client.json("GET", "api/status", null);
+            String fpKey = "server".equals(side) ? "server_fingerprint" : "client_fingerprint";
+            next.put("fingerprint", Json.str(status, fpKey));
+        } catch (Exception ignored) {
+            // fingerprint is an optimization
+        }
+        writeState(instanceDir, next);
         return new Result(version, "", text, !applied.isEmpty(), applied, keptLocal);
     }
 
@@ -568,6 +614,18 @@ final class Sync {
 
     static Check inspect(Path instanceDir, String side, Client client) throws Exception {
         Map<String, Object> state = loadState(instanceDir);
+        try {
+            Map<String, Object> status = client.json("GET", "api/status", null);
+            String fpKey = "server".equals(side) ? "server_fingerprint" : "client_fingerprint";
+            String fp = Json.str(status, fpKey);
+            String version = Json.str(status, "official_version");
+            if (!fp.isBlank() && fp.equals(Json.str(state, "fingerprint"))
+                    && version.equals(Json.str(state, "official_version"))) {
+                return new Check(false, false, "", version);
+            }
+        } catch (Exception ignored) {
+            // fall through to full inspect
+        }
         List<String> managedPaths = new ArrayList<>();
         for (Object item : Json.array(state.get("managed_paths"))) {
             managedPaths.add(Fs.posix(String.valueOf(item)));
@@ -577,7 +635,7 @@ final class Sync {
             syncedHashes.put(Fs.posix(entry.getKey()), String.valueOf(entry.getValue()));
         }
         Map<String, Object> remote = client.json("GET", "api/manifest?side=" + side, null);
-        List<Object> remoteFiles = Json.array(remote.get("files"));
+        List<Object> remoteFiles = Json.requiredArray(remote.get("files"), "files");
         List<Object> localFiles = scan(instanceDir, remoteFiles, managedPaths);
         boolean needed = false;
         boolean modsChanged = false;
@@ -623,10 +681,14 @@ final class Sync {
         }
         try {
             Path file = instanceDir.resolve(rel);
-            return Files.isRegularFile(file) && PackPaths.hasManagedTag(Files.readString(file));
+            return Files.isRegularFile(file) && PackPaths.hasManagedTag(readLoose(file));
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private static String readLoose(Path path) throws Exception {
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }
 
     private static boolean keepServerProperties(Path instanceDir, String rel) {
@@ -680,7 +742,7 @@ final class Sync {
             }
             if (built != null) {
                 try {
-                    Map<String, Object> meta = built.get();
+                    Map<String, Object> meta = built.get(15, java.util.concurrent.TimeUnit.MINUTES);
                     written.addAll(client.savePack(instanceDir, Json.str(meta, "sha256"), Json.lng(meta, "size"),
                             Json.str(meta, "lease"), small, progress, true, "小文件压缩包"));
                 } catch (Exception error) {
@@ -979,6 +1041,13 @@ final class Sync {
                 }
                 Files.move(partial, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             } catch (java.io.IOException error) {
+                try {
+                    if (Files.exists(stale) && !Files.exists(dest)) {
+                        Files.move(stale, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } catch (java.io.IOException ignored) {
+                    // original may already be gone
+                }
                 Files.deleteIfExists(partial);
                 throw error;
             }

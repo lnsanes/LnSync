@@ -40,7 +40,9 @@ final class PackPaths {
     private static final String[] PROTECTED_PREFIXES = {
             "saves/", "world/", "world_nether/", "world_the_end/", "logs/",
             "crash-reports/", "libraries/", "versions/", "screenshots/",
-            "replay_recordings/", "journeymap/", "XaeroWorldMap/", "XaeroWaypoints/", "local/",
+            "replay_recordings/", "journeymap/", "XaeroWorldMap/", "XaeroWaypoints/", "local/"
+    };
+    private static final String[] CONFIG_PREFIXES = {
             "config/", "defaultconfigs/"
     };
 
@@ -101,6 +103,10 @@ final class PackPaths {
     static boolean protectedLocal(String rel) {
         String path = Fs.posix(rel);
         return PROTECTED_FILES.contains(path) || startsWithAny(path, PROTECTED_PREFIXES);
+    }
+
+    static boolean configLike(String rel) {
+        return startsWithAny(Fs.posix(rel), CONFIG_PREFIXES);
     }
 
     static final String MANAGED_TAG = "# lnsync-managed";

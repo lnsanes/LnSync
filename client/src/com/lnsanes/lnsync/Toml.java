@@ -16,6 +16,9 @@ final class Toml {
     }
 
     static Map<String, Object> parse(String text) {
+        if (text != null && !text.isEmpty() && text.charAt(0) == '\uFEFF') {
+            text = text.substring(1);
+        }
         Map<String, Object> root = new LinkedHashMap<>();
         Map<String, Object> current = root;
         for (String raw : text.split("\n")) {

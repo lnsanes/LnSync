@@ -23,6 +23,11 @@ _loader_e2e/
 
 # 客户端发行副本可重建；源码与示例保留
 dist/client/*.jar
+dist/*.exe
+dist/lnsync-server.exe
+
+# 含主机/令牌的本机部署脚本，勿提交
+_mcai_deploy/
 
 # 系统与编辑器
 .DS_Store

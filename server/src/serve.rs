@@ -90,8 +90,14 @@ impl Config {
 }
 
 pub async fn listen(addr: String, data: PathBuf, config: PathBuf) -> io::Result<()> {
-    let version = config_field(&config, "version");
-    let tag = if version.is_empty() { config_field(&config, "tag") } else { version };
+    if !config.is_file() {
+        eprintln!("配置文件不存在: {}，拒绝以空配置对外服务", config.display());
+        return Err(io::Error::new(io::ErrorKind::NotFound, "config missing"));
+    }
+    let tag = build::safe_release_tag(&{
+        let tagged = config_field(&config, "tag");
+        if tagged.is_empty() { config_field(&config, "version") } else { tagged }
+    }).unwrap_or_default();
     match build::reclaim_storage(&data, &tag, true) {
         Ok(report) if !report.is_empty() => println!("{}", report.summary()),
         Err(error) => eprintln!("存储回收失败: {error}"),
@@ -117,7 +123,31 @@ pub async fn listen(addr: String, data: PathBuf, config: PathBuf) -> io::Result<
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(_) => {
+                let _ = ctrl_c.await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
+    }
 }
 
 fn load_overlay(path: &Path) -> std::collections::HashSet<String> {
@@ -191,12 +221,13 @@ impl App {
         let path = self.data.join("manifests").join(format!("{side}.json"));
         let buf = fs::read(&path).map_err(|_| format!("尚未构建 {side} 清单"))?;
         let mut doc: serde_json::Value = serde_json::from_slice(&buf).map_err(|error| error.to_string())?;
+        let overlay = load_overlay(&self.data.join("manifests").join("private-index.json"));
         if let Some(files) = doc.get_mut("files").and_then(|value| value.as_array_mut()) {
             for file in files {
                 let Some(path) = file.get("path").and_then(|value| value.as_str()) else {
                     continue;
                 };
-                if load_overlay(&self.data.join("manifests").join("private-index.json")).contains(&posix(path)) {
+                if overlay.contains(&posix(path)) {
                     if let Some(object) = file.as_object_mut() {
                         object.insert("overlay".into(), serde_json::Value::Bool(true));
                     }
@@ -645,6 +676,10 @@ fn presented_player_token(headers: &HeaderMap) -> String {
     provided
 }
 
+fn allow_anonymous(config: &Path) -> bool {
+    matches!(config_field(config, "allow_anonymous").to_ascii_lowercase().as_str(), "true" | "1" | "yes")
+}
+
 fn player_allowed(config: &Path, headers: &HeaderMap, side: Option<&str>) -> bool {
     let client_token = config_field(config, "access_token");
     let server_token = config_field(config, "server_access_token");
@@ -657,13 +692,13 @@ fn player_allowed(config: &Path, headers: &HeaderMap, side: Option<&str>) -> boo
                 server_token
             };
             if expected.is_empty() {
-                return true;
+                return allow_anonymous(config);
             }
             constant_eq(provided.as_bytes(), expected.as_bytes())
         }
         Some("client") => {
             if client_token.is_empty() {
-                return true;
+                return allow_anonymous(config);
             }
             // When server token is configured, refuse using it for client side.
             if !server_token.is_empty() && constant_eq(provided.as_bytes(), server_token.as_bytes()) {
@@ -674,7 +709,7 @@ fn player_allowed(config: &Path, headers: &HeaderMap, side: Option<&str>) -> boo
         _ => {
             // status / file / discard: either configured token is enough
             if client_token.is_empty() && server_token.is_empty() {
-                return true;
+                return allow_anonymous(config);
             }
             (!client_token.is_empty() && constant_eq(provided.as_bytes(), client_token.as_bytes()))
                 || (!server_token.is_empty() && constant_eq(provided.as_bytes(), server_token.as_bytes()))
@@ -925,6 +960,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn app_with(dir: &Path) -> Router {
+        let _ = fs::write(dir.join("config.toml"), "allow_anonymous = true\n");
         let app = App {
             data: dir.to_path_buf(),
             config: dir.join("config.toml"),

@@ -159,8 +159,10 @@ public final class LaunchHook {
                 // keep default
             }
         }
-        urls.add("http://127.0.0.1:" + port);
-        urls.add("http://localhost:" + port);
+        if (urls.isEmpty()) {
+            urls.add("http://127.0.0.1:" + port);
+            urls.add("http://localhost:" + port);
+        }
         return new ArrayList<>(urls);
     }
 
@@ -277,10 +279,18 @@ public final class LaunchHook {
             String arg = args.get(i);
             for (String key : keys) {
                 if (key.endsWith("=") && arg.startsWith(key)) {
-                    return Path.of(arg.substring(key.length())).toAbsolutePath().normalize();
+                    try {
+                        return Path.of(arg.substring(key.length())).toAbsolutePath().normalize();
+                    } catch (Exception ignored) {
+                        return null;
+                    }
                 }
                 if (key.equals(arg) && i + 1 < args.size()) {
-                    return Path.of(args.get(i + 1)).toAbsolutePath().normalize();
+                    try {
+                        return Path.of(args.get(i + 1)).toAbsolutePath().normalize();
+                    } catch (Exception ignored) {
+                        return null;
+                    }
                 }
             }
         }
@@ -295,11 +305,14 @@ public final class LaunchHook {
             return true;
         }
         String command = System.getProperty("sun.java.command", "").toLowerCase();
-        if (command.contains("forgeserver") || command.contains("minecraftserver") || command.contains("nogui")) {
+        if (command.contains("forgeserver") || command.contains("minecraftserver") || command.contains("nogui")
+                || command.contains("knotserver") || command.contains("quilt.loader.impl.launch.server")
+                || command.contains("net.fabricmc.loader.impl.launch.knot.knotserver")) {
             return true;
         }
         String joined = String.join(" ", ManagementFactory.getRuntimeMXBean().getInputArguments()).toLowerCase();
-        return joined.contains("fml.dist=dedicated") || joined.contains("forge.launch.dist=server");
+        return joined.contains("fml.dist=dedicated") || joined.contains("forge.launch.dist=server")
+                || joined.contains("fabric.side=server") || joined.contains("quilt.side=server");
     }
 
     private static void log(Path instance, String line) {
