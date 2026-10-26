@@ -1038,9 +1038,11 @@ impl ReclaimReport {
     }
 }
 
+const PACK_OBJECT_KEEP: usize = 2;
+
 pub fn reclaim_storage(data: &Path, current_version: &str, drop_extracts: bool) -> Result<ReclaimReport, String> {
-    let live = live_object_hashes(data);
-    let mut cache_items = drop_stale_packs(&data.join("packs"), &live);
+    let mut live = live_object_hashes(data);
+    let mut cache_items = retain_recent_packs(&data.join("packs"), &mut live, PACK_OBJECT_KEEP);
     let (objects, object_bytes) = prune_objects(&data.join("objects"), &live)?;
     cache_items += prune_cache(&data.join("cache"), current_version, drop_extracts)?;
     Ok(ReclaimReport { objects, object_bytes, cache_items })
@@ -1051,27 +1053,54 @@ fn live_object_hashes(data: &Path) -> HashSet<String> {
     for name in ["client.json", "server.json"] {
         add_manifest_hashes(&data.join("manifests").join(name), &mut live);
     }
-    add_pack_hashes(&data.join("packs"), &mut live);
     live
 }
 
-fn add_pack_hashes(packs: &Path, live: &mut HashSet<String>) {
-    let Ok(entries) = fs::read_dir(packs) else { return };
+fn retain_recent_packs(packs: &Path, live: &mut HashSet<String>, keep: usize) -> u64 {
+    let Ok(entries) = fs::read_dir(packs) else {
+        return 0;
+    };
+    let mut removed = 0u64;
+    let mut ranked = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.ends_with(".json") || name.starts_with("build-") || path.is_dir() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("build-") {
+            let _ = fs::remove_file(&path);
+            removed += 1;
             continue;
         }
-        let Ok(buf) = fs::read(&path) else { continue };
-        let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&buf) else { continue };
-        if let Some(sha) = doc.get("sha256").and_then(|value| value.as_str()) {
-            if is_object_hash(sha) {
-                live.insert(sha.to_ascii_lowercase());
-            }
+        if !name.ends_with(".json") || path.is_dir() {
+            continue;
         }
+        let sha = fs::read(&path).ok().and_then(|buf| {
+            serde_json::from_slice::<serde_json::Value>(&buf).ok().and_then(|doc| {
+                doc.get("sha256")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_ascii_lowercase())
+                    .filter(|value| is_object_hash(value))
+            })
+        });
+        let Some(sha) = sha else {
+            let _ = fs::remove_file(&path);
+            removed += 1;
+            continue;
+        };
+        let mtime = fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        ranked.push((mtime, path, sha));
     }
+    ranked.sort_by(|left, right| right.0.cmp(&left.0));
+    for (index, (_mtime, path, sha)) in ranked.into_iter().enumerate() {
+        if index < keep {
+            live.insert(sha);
+            continue;
+        }
+        let _ = fs::remove_file(path);
+        removed += 1;
+    }
+    removed
 }
 
 fn add_manifest_hashes(path: &Path, live: &mut HashSet<String>) {
@@ -1091,35 +1120,6 @@ fn add_manifest_hashes(path: &Path, live: &mut HashSet<String>) {
             }
         }
     }
-}
-
-fn drop_stale_packs(packs: &Path, live: &HashSet<String>) -> u64 {
-    let Ok(entries) = fs::read_dir(packs) else {
-        return 0;
-    };
-    let mut removed = 0u64;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("build-") {
-            let _ = fs::remove_file(&path);
-            removed += 1;
-            continue;
-        }
-        if !name.ends_with(".json") || path.is_dir() {
-            continue;
-        }
-        let keep = fs::read(&path).ok().and_then(|buf| serde_json::from_slice::<serde_json::Value>(&buf).ok()).and_then(|doc| {
-            doc.get("sha256").and_then(|value| value.as_str()).map(|sha| live.contains(&sha.to_ascii_lowercase()))
-        }).unwrap_or(false);
-        if keep {
-            continue;
-        }
-        let _ = fs::remove_file(&path);
-        removed += 1;
-    }
-    removed
 }
 
 fn prune_objects(objects: &Path, live: &HashSet<String>) -> Result<(u64, u64), String> {
@@ -1834,6 +1834,42 @@ mod reclaim_tests {
         assert!(current.join("packwiz").exists());
         assert!(current.join("Client-v-now.zip").is_file());
         assert!(!current.join("client-raw").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reclaim_drops_historical_pack_zips() {
+        let dir = scratch("lnsync-reclaim-packs");
+        let manifest = hex64('b');
+        put_object(&dir, &manifest, b"keep");
+        fs::create_dir_all(dir.join("manifests")).unwrap();
+        fs::write(
+            dir.join("manifests").join("client.json"),
+            serde_json::json!({"files":[{"path":"mods/keep.jar","sha256": manifest}]}).to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join("manifests").join("server.json"), "{\"files\":[]}").unwrap();
+        fs::create_dir_all(dir.join("packs")).unwrap();
+        let mut digests = Vec::new();
+        for (index, ch) in ['c', 'd', 'e'].into_iter().enumerate() {
+            let digest = hex64(ch);
+            put_object(&dir, &digest, format!("zip{index}").as_bytes());
+            let meta = dir.join("packs").join(format!("pack{index}.json"));
+            fs::write(&meta, serde_json::json!({"sha256": digest}).to_string()).unwrap();
+            let file = fs::File::options().write(true).open(&meta).unwrap();
+            file.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs((index as u64) + 10))
+                .unwrap();
+            digests.push(digest);
+        }
+        let report = reclaim_storage(&dir, "v-now", true).unwrap();
+        assert!(report.objects >= 1);
+        assert!(dir.join("objects").join(&manifest[..2]).join(&manifest).is_file());
+        assert!(!dir.join("objects").join(&digests[0][..2]).join(&digests[0]).is_file());
+        assert!(dir.join("objects").join(&digests[1][..2]).join(&digests[1]).is_file());
+        assert!(dir.join("objects").join(&digests[2][..2]).join(&digests[2]).is_file());
+        assert!(!dir.join("packs").join("pack0.json").exists());
+        assert!(dir.join("packs").join("pack1.json").is_file());
+        assert!(dir.join("packs").join("pack2.json").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 
