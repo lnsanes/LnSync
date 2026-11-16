@@ -1,0 +1,70 @@
+name: Release build
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/release-build.yml'
+      - 'server/Cargo.toml'
+      - 'client/resources/loaders/**'
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl --features static-openssl
+        working-directory: server
+      - name: Verify static executable and package
+        run: |
+          binary=server/target/x86_64-unknown-linux-musl/release/lnsync-server
+          file "$binary"
+          if readelf -l "$binary" | grep -q INTERP; then exit 1; fi
+          set +e
+          "$binary" >smoke.log 2>&1
+          code=$?
+          set -e
+          cat smoke.log
+          test "$code" -eq 2
+          mkdir release-assets
+          cp "$binary" release-assets/
+          cp server/config.example.toml release-assets/
+          git rev-parse 'HEAD^{tree}' > release-assets/linux-source-tree.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: release-assets/*
+          if-no-files-found: error
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: cargo build --release --locked
+        working-directory: server
+      - run: ./client/build.ps1
+        shell: pwsh
+      - name: Smoke test and package
+        shell: pwsh
+        run: |
+          & ./server/target/release/lnsync-server.exe
+          if ($LASTEXITCODE -ne 2) { throw "Unexpected server exit code: $LASTEXITCODE" }
+          New-Item -ItemType Directory release-assets | Out-Null
+          Copy-Item server/target/release/lnsync-server.exe release-assets/
+          Copy-Item dist/client/*.jar release-assets/
+          Copy-Item client/lnsync.toml.example release-assets/
+          git rev-parse 'HEAD^{tree}' | Set-Content release-assets/windows-source-tree.txt
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: release-assets/*
+          if-no-files-found: error

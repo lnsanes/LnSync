@@ -1,6 +1,6 @@
 [package]
 name = "lnsync-server"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 [[bin]]
@@ -26,3 +26,6 @@ tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[features]
+static-openssl = ["reqwest/native-tls-vendored"]
