@@ -4,7 +4,7 @@
 
 A generic file updater for Minecraft modpacks. The server hosts files from a content-addressed manifest; the client mod syncs by SHA-256 early in game launch. Forge, NeoForge, Fabric, and Quilt are supported. A universal client jar loads on all four.
 
-Current release: **v0.1.4**  
+Current release: **v0.1.7**  
 Downloads: https://github.com/lnsanes/LnSync/releases
 
 ---
@@ -40,13 +40,12 @@ lnsync-server.exe serve --config config.toml
 
 **Linux (x86_64)**
 
-This release does not ship a prebuilt Linux binary. Build on Linux (or in Docker):
+Download `lnsync-server` (x86_64, statically linked musl/OpenSSL), then run:
 
 ```bash
-cd server
-cargo build --release
+chmod +x lnsync-server
 cp config.example.toml config.toml
-./target/release/lnsync-server serve --config config.toml
+./lnsync-server serve --config config.toml
 ```
 
 After the first start, open the admin UI, set the pack source, and run **Rebuild** once to generate client/server manifests.

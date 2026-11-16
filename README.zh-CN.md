@@ -4,7 +4,7 @@
 
 面向 Minecraft 整合包的通用文件更新器：服务端按清单托管文件，客户端在游戏启动早期按文件哈希做增量同步。支持 Forge、NeoForge、Fabric、Quilt；也提供一份通用客户端模组，四种加载器都能加载。
 
-当前版本：**v0.1.4**  
+当前版本：**v0.1.7**  
 发布页：https://github.com/lnsanes/LnSync/releases
 
 ---
@@ -40,13 +40,12 @@ lnsync-server.exe serve --config config.toml
 
 **Linux（x86_64）**
 
-本版不提供预编译 Linux 二进制。请在 Linux 或 Docker 里从源码构建：
+下载 `lnsync-server`（x86_64，静态链接 musl/OpenSSL），然后运行：
 
 ```bash
-cd server
-cargo build --release
+chmod +x lnsync-server
 cp config.example.toml config.toml
-./target/release/lnsync-server serve --config config.toml
+./lnsync-server serve --config config.toml
 ```
 
 首次启动后打开管理页，配置好源信息，执行一次「重新构建」，生成客户端/服务端清单。
