@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,6 +6,7 @@ use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
 pub fn build_repos(config: &Path, admin: &super::admin::Admin) -> Result<(), String> {
+    let _guard = super::PACK_BUILD.lock().unwrap_or_else(|error| error.into_inner());
     let version = safe_release_tag(&first_field(config, &["tag", "version"]))?;
     if version.is_empty() {
         return Err("source.tag / version 未配置，例如 v1.0.0".into());
@@ -1079,141 +1079,30 @@ fn fingerprint(files: &[serde_json::Value]) -> String {
 }
 
 pub struct ReclaimReport {
-    pub objects: u64,
     pub object_bytes: u64,
     pub cache_items: u64,
 }
 
 impl ReclaimReport {
     pub fn is_empty(&self) -> bool {
-        self.objects == 0 && self.cache_items == 0
+        self.object_bytes == 0 && self.cache_items == 0
     }
 
     pub fn summary(&self) -> String {
         format!(
-            "已回收对象库 {} 个（{}），下载缓存 {} 项",
-            self.objects,
+            "已回收临时对象 {}，下载缓存 {} 项",
             format_size(self.object_bytes as i64),
             self.cache_items
         )
     }
 }
 
-const PACK_OBJECT_KEEP: usize = 2;
 
 pub fn reclaim_storage(data: &Path, current_version: &str, drop_extracts: bool) -> Result<ReclaimReport, String> {
-    let mut live = live_object_hashes(data);
-    let mut cache_items = retain_recent_packs(&data.join("packs"), &mut live, PACK_OBJECT_KEEP);
-    let (objects, object_bytes) = prune_objects(&data.join("objects"), &live)?;
-    cache_items += prune_cache(&data.join("cache"), current_version, drop_extracts)?;
-    Ok(ReclaimReport { objects, object_bytes, cache_items })
-}
-
-fn live_object_hashes(data: &Path) -> HashSet<String> {
-    let mut live = HashSet::new();
-    for name in ["client.json", "server.json"] {
-        add_manifest_hashes(&data.join("manifests").join(name), &mut live);
-    }
-    live
-}
-
-fn retain_recent_packs(packs: &Path, live: &mut HashSet<String>, keep: usize) -> u64 {
-    let Ok(entries) = fs::read_dir(packs) else {
-        return 0;
-    };
-    let mut removed = 0u64;
-    let mut ranked = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("build-") {
-            let _ = fs::remove_file(&path);
-            removed += 1;
-            continue;
-        }
-        if !name.ends_with(".json") || path.is_dir() {
-            continue;
-        }
-        let sha = fs::read(&path).ok().and_then(|buf| {
-            serde_json::from_slice::<serde_json::Value>(&buf).ok().and_then(|doc| {
-                doc.get("sha256")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.to_ascii_lowercase())
-                    .filter(|value| is_object_hash(value))
-            })
-        });
-        let Some(sha) = sha else {
-            let _ = fs::remove_file(&path);
-            removed += 1;
-            continue;
-        };
-        let mtime = fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        ranked.push((mtime, path, sha));
-    }
-    ranked.sort_by(|left, right| right.0.cmp(&left.0));
-    for (index, (_mtime, path, sha)) in ranked.into_iter().enumerate() {
-        if index < keep {
-            live.insert(sha);
-            continue;
-        }
-        let _ = fs::remove_file(path);
-        removed += 1;
-    }
-    removed
-}
-
-fn add_manifest_hashes(path: &Path, live: &mut HashSet<String>) {
-    let Ok(buf) = fs::read(path) else {
-        return;
-    };
-    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&buf) else {
-        return;
-    };
-    let Some(files) = doc.get("files").and_then(|value| value.as_array()) else {
-        return;
-    };
-    for file in files {
-        if let Some(sha) = file.get("sha256").and_then(|value| value.as_str()) {
-            if is_object_hash(sha) {
-                live.insert(sha.to_ascii_lowercase());
-            }
-        }
-    }
-}
-
-fn prune_objects(objects: &Path, live: &HashSet<String>) -> Result<(u64, u64), String> {
-    if !objects.is_dir() || live.is_empty() {
-        return Ok((0, 0));
-    }
-    let mut removed = 0u64;
-    let mut bytes = 0u64;
-    let prefixes = fs::read_dir(objects).map_err(|error| error.to_string())?;
-    for prefix in prefixes.flatten() {
-        let dir = prefix.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let files = match fs::read_dir(&dir) {
-            Ok(files) => files,
-            Err(_) => continue,
-        };
-        for file in files.flatten() {
-            let path = file.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = file.file_name().to_string_lossy().to_ascii_lowercase();
-            if is_object_hash(&name) && !live.contains(&name) {
-                bytes += fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-                let _ = fs::remove_file(&path);
-                removed += 1;
-            }
-        }
-        let _ = fs::remove_dir(&dir);
-    }
-    Ok((removed, bytes))
+    // Same expiry policy at startup, after builds, and during normal serving.
+    let object_bytes = super::storage::collect(data, std::time::SystemTime::now())?;
+    let cache_items = prune_cache(&data.join("cache"), current_version, drop_extracts)?;
+    Ok(ReclaimReport { object_bytes, cache_items })
 }
 
 fn prune_cache(cache: &Path, current_version: &str, drop_extracts: bool) -> Result<u64, String> {
@@ -1906,11 +1795,7 @@ mod reclaim_tests {
             serde_json::json!({"sha256": pack}).to_string(),
         )
         .unwrap();
-        fs::write(
-            dir.join("packs").join("stale.json"),
-            serde_json::json!({"sha256": "not-a-hash"}).to_string(),
-        )
-        .unwrap();
+
         fs::create_dir_all(dir.join("cache").join("v-old").join("packwiz")).unwrap();
         fs::write(dir.join("cache").join("v-old").join("Client-v-old.zip"), b"old").unwrap();
         let current = dir.join("cache").join("v-now");
@@ -1920,13 +1805,15 @@ mod reclaim_tests {
         fs::create_dir_all(current.join("client-raw")).unwrap();
         fs::write(current.join("client-raw").join("keep.txt"), b"extract").unwrap();
 
+        let orphan_path = dir.join("objects").join(&orphan[..2]).join(&orphan);
+        fs::OpenOptions::new().write(true).open(orphan_path).unwrap().set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
         let report = reclaim_storage(&dir, "v-now", true).unwrap();
-        assert!(report.objects >= 1, "should delete orphan object");
+        assert!(report.object_bytes >= 1, "should delete orphan object");
         assert!(!dir.join("objects").join(&orphan[..2]).join(&orphan).is_file());
         assert!(dir.join("objects").join(&live[..2]).join(&live).is_file());
         assert!(dir.join("objects").join(&pack[..2]).join(&pack).is_file());
         assert!(dir.join("packs").join("live.json").is_file());
-        assert!(!dir.join("packs").join("stale.json").exists());
+
         assert!(!dir.join("cache").join("v-old").exists());
         assert!(current.join("packwiz").exists());
         assert!(current.join("Client-v-now.zip").is_file());
@@ -1958,8 +1845,10 @@ mod reclaim_tests {
                 .unwrap();
             digests.push(digest);
         }
+        let expired = dir.join("objects").join(&digests[0][..2]).join(&digests[0]);
+        fs::OpenOptions::new().write(true).open(expired).unwrap().set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
         let report = reclaim_storage(&dir, "v-now", true).unwrap();
-        assert!(report.objects >= 1);
+        assert!(report.object_bytes >= 1);
         assert!(dir.join("objects").join(&manifest[..2]).join(&manifest).is_file());
         assert!(!dir.join("objects").join(&digests[0][..2]).join(&digests[0]).is_file());
         assert!(dir.join("objects").join(&digests[1][..2]).join(&digests[1]).is_file());

@@ -287,6 +287,15 @@ LnSync/
 
 ---
 
+## Temporary download cache
+
+- Identical sets of file paths and SHA-256 hashes reuse one ZIP regardless of selection order or duplicates. ZIP timestamps are deterministic.
+- Completing a download releases its lease and retains the cached ZIP. Cache requests, lease releases, and file requests (including Range downloads) refresh idle age.
+- Startup, completed builds, new pack requests, and a 60-second maintenance loop collect temporary packs, interrupted builds, and orphan objects idle for two hours. Abandoned leases cannot retain them indefinitely.
+- New packs require room within a 4 GiB temporary-cache budget and must leave 2 GiB of disk space available. Linux and Windows check actual free space; insufficient capacity returns an error before writing.
+- Objects referenced by either current manifest stay protected. An unreadable or malformed manifest or pack record stops collection and logs an error; maintenance retries after the data is repaired.
+- Current-version Packwiz downloads remain available for rebuilding. Builds, packing, and collection share one lock.
+
 ## FAQ
 
 **Client says `unsupported URI` and the host is an IDN?**  
