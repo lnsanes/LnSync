@@ -4,7 +4,7 @@
 
 A generic file updater for Minecraft modpacks. The server hosts files from a content-addressed manifest; the client mod syncs by SHA-256 early in game launch. Forge, NeoForge, Fabric, and Quilt are supported. A universal client jar loads on all four.
 
-Current release: **v0.1.7**  
+Current release: **v0.1.8**
 Downloads: https://github.com/lnsanes/LnSync/releases
 
 ---
@@ -53,7 +53,7 @@ After the first start, open the admin UI, set the pack source, and run **Rebuild
 Default admin URL (local example):
 
 ```text
-http://127.0.0.1:8765/admin/ifgfsgfbijuzoxzq
+http://127.0.0.1:8765/admin
 ```
 
 If `admin_token` is set, the admin UI asks for that password.
@@ -246,8 +246,8 @@ If the configured host is unreachable, the client tries localhost on the same po
 
 ## Admin UI
 
-- Path prefix: `/admin/ifgfsgfbijuzoxzq`
-- Full example: `http://PUBLIC-OR-LAN-IP:PORT/admin/ifgfsgfbijuzoxzq`
+- Path prefix: `/admin`
+- Full example: `http://PUBLIC-OR-LAN-IP:PORT/admin`
 - Editable: repo, tag, asset globs, loader, bind/public URL, sync tokens
 - Actions: rebuild, logs/progress, overlay files, official-pack excludes (categories/search), connection info
 - The admin token is not echoed back. Responses keep CSP, X-Frame-Options, and similar headers

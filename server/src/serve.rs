@@ -129,10 +129,10 @@ pub async fn listen(addr: String, data: PathBuf, config: PathBuf) -> io::Result<
         .route("/api/manifest", get(manifest))
         .route("/api/file/{digest}", get(file).head(file))
         .route("/api/pack", post(pack).get(pack))
-        .route("/admin/ifgfsgfbijuzoxzq", get(admin::page))
-        .route("/admin/ifgfsgfbijuzoxzq/", get(admin::page))
-        .route("/admin/ifgfsgfbijuzoxzq/icon.png", get(admin::icon))
-        .route("/admin/ifgfsgfbijuzoxzq/api/{*action}", get(admin::api).post(admin::api))
+        .route("/admin", get(admin::page))
+        .route("/admin/", get(admin::page))
+        .route("/admin/icon.png", get(admin::icon))
+        .route("/admin/api/{*action}", get(admin::api).post(admin::api))
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024))
         .with_state(app);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

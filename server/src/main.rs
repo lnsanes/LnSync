@@ -25,7 +25,7 @@ async fn main() -> ExitCode {
     let addr = format!("{}:{}", settings.listen, settings.port);
     println!("Rust 更新服务器已启动 http://{addr}");
     println!("清单不缓存，文件按哈希长期缓存，支持断点续传。");
-    println!("网页管理 http://{addr}/admin/ifgfsgfbijuzoxzq");
+    println!("网页管理 http://{addr}/admin");
     if let Err(error) = serve::listen(addr, data, config).await {
         eprintln!("{error}");
         return ExitCode::from(1);
