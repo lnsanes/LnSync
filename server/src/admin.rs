@@ -14,12 +14,12 @@ use crate::serve::App;
 
 const PAGE: &str = include_str!("../web/admin.html");
 const ICON_PNG: &[u8] = include_bytes!("../web/icon.png");
-const ADMIN_PREFIX: &str = "/admin/ifgfsgfbijuzoxzq";
+const ADMIN_PREFIX: &str = "/admin";
 const LOGIN_GATE: &str = r#"<!DOCTYPE html>
 <html lang="zh-CN"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<link rel="icon" type="image/png" href="/admin/ifgfsgfbijuzoxzq/icon.png">
+<link rel="icon" type="image/png" href="/admin/icon.png">
 <title>LnSync 管理登录</title>
 <style>
 body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:"Bahnschrift","Segoe UI Variable Text","PingFang SC","Microsoft YaHei UI",sans-serif;background:#0b1218;color:#e8f1f7}
@@ -36,7 +36,7 @@ button{margin-top:14px;width:100%;padding:11px 12px;border:0;border-radius:11px;
 .err{margin-top:10px;color:#ffb4b4;font-size:.85rem;min-height:1.2em}
 </style></head><body>
 <form class="card" id="f">
-<img class="mark" src="/admin/ifgfsgfbijuzoxzq/icon.png" alt="LnSync" width="56" height="56">
+<img class="mark" src="/admin/icon.png" alt="LnSync" width="56" height="56">
 <h1>LnSync</h1>
 <p>管理面板需先登录。未认证不会下发完整管理页。</p>
 <label for="token">管理令牌</label>
@@ -381,7 +381,7 @@ fn state(app: &App) -> Value {
         "server_sync_token_enabled": !cfg_field(&app.config, "server_access_token").is_empty(),
         "busy": inner.busy,
         "progress": progress,
-        "admin_url": format!("http://{host}:{}/admin/ifgfsgfbijuzoxzq", inner.port),
+        "admin_url": format!("http://{host}:{}/admin", inner.port),
         "client_fingerprint": meta.get("client_fingerprint").cloned().unwrap_or(Value::Null),
         "server_fingerprint": meta.get("server_fingerprint").cloned().unwrap_or(Value::Null),
         "servers": load_servers(&app.data),

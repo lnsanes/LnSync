@@ -4,7 +4,7 @@
 
 面向 Minecraft 整合包的通用文件更新器：服务端按清单托管文件，客户端在游戏启动早期按文件哈希做增量同步。支持 Forge、NeoForge、Fabric、Quilt；也提供一份通用客户端模组，四种加载器都能加载。
 
-当前版本：**v0.1.7**  
+当前版本：**v0.1.8**
 发布页：https://github.com/lnsanes/LnSync/releases
 
 ---
@@ -53,7 +53,7 @@ cp config.example.toml config.toml
 管理页默认地址（本机示例）：
 
 ```text
-http://127.0.0.1:8765/admin/ifgfsgfbijuzoxzq
+http://127.0.0.1:8765/admin
 ```
 
 若设置了 `admin_token`，打开管理页需要输入该口令。
@@ -246,8 +246,8 @@ update_token = "与服务端 access_token 一致"
 
 ## 管理页
 
-- 路径前缀：`/admin/ifgfsgfbijuzoxzq`  
-- 完整示例：`http://公网或局域网IP:端口/admin/ifgfsgfbijuzoxzq`  
+- 路径前缀：`/admin`
+- 完整示例：`http://公网或局域网IP:端口/admin`
 - 可改：仓库、标签、附件通配符、加载器、监听与对外地址、同步令牌等  
 - 可执行：重新构建、查看日志与进度、管理私货、调整官方包文件（分类/搜索排除）、连接信息等  
 - 管理令牌不会在页面回显；响应头保留 CSP、X-Frame-Options 等基础防护  
